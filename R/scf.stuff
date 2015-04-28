@@ -1,0 +1,197 @@
+*++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*;
+*++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*;
+* MACRO MEANIT;
+
+* AK November 12, 2002;
+
+* DSN specifies the name of the data set to be used (the data set should contain the following: the main weight renamed as WGT0, a set of variables WGT1-WGT999 equal to the replicate weights multiplied by the multiplicity factors, a variable for which one wishes to compute the standard error due to imputation and sampling for the mean and median, and a variable IMPLIC equal to the implicate number of each case) VAR contains the name of the variable for which one desires standard errors PFLAG: blank prints interim statistics/any character string (e.g., NO) suppresses printing WHERE: defines subsets of data (use IML conventions, e.g.,  ((X333=3 | X444=4) & X555=5 & X666^=6);
+
+* WARNING: this MACRO is not intended to be used with subsets  of the full survey data where the population total varies  across subsetted implicates: to use this MACRO to make  calculations for a subset of the full data set, invoke the WHERE  statement;  
+
+* NOTE: the calculation excludes observations with missing values  from the calculation.  Thus, if one wants to make the  calculation for only non-INAP values, a convenient short cut  might be to set all such values (normally zero in the main SCF database) to a missing value (a WHERE condition would also work).  The program assumes that missing value patterns are consistent across implicates--if this is not the case, a WHERE condition should be used;
+
+* WARNING: if one uses this MACRO to compute variances for very small sub-populations, there is a chance that some of the replicates may contain no cases where the condition defining the sub-population holds.  In this case, the program will return a fatal error;
+                                
+%MACRO MEANIT(DSN=,VAR=NW2,PFLAG=,WHERE=);
+
+PROC SORT DATA=&DSN;
+BY &VAR;
+RUN;
+                                
+* compute pooled (over implicates) global mean/median;
+PROC UNIVARIATE DATA=&DSN;
+%IF (&WHERE NE ) %THEN %DO;
+WHERE (&WHERE & &VAR>.Z);
+%END;
+%ELSE %DO;
+WHERE (&VAR>.Z);
+%END;
+FREQ WGT0;
+VAR &VAR;
+RUN;
+
+
+PROC IML WORKSPACE=9000 SYMSIZE=5000;
+RESET LOG LINESIZE=78;
+
+PRINT "CALCULATION FOR &VAR";
+
+*   first imputation variance;
+
+EDIT &DSN;
+TEMP={IMPLIC &VAR WGT0};
+%IF (&WHERE EQ ) %THEN %DO;
+READ ALL VAR TEMP WHERE (&VAR>.Z) INTO MDATA;
+%END;
+%ELSE %DO;
+READ ALL VAR TEMP WHERE (&WHERE) INTO MDATA;
+%END;
+
+*   total population;
+%IF (&WHERE EQ ) %THEN %DO;
+POP=SUM(MDATA[,3])/5;
+%END;
+
+*   create matrix to hold values of means/medians by implicates;
+IM=SHAPE(0,1,5);
+ID=SHAPE(0,1,5);
+
+*   compute mean/median;
+DO I=1 TO 5;
+IMP=MDATA[LOC(MDATA[,1]=I),2:3];
+*     compute mean;
+MM=IMP[,1]#IMP[,2];
+%IF (&WHERE NE ) %THEN %DO;
+POP=SUM(IMP[,2]);
+%END;
+IM[1,I]=MM[+,]/POP;
+*     compute median;
+IMP[,2]=CUSUM(IMP[,2])/POP;
+ID[1,I]=IMP[MIN(LOC(IMP[,2]>=.5)),1];
+FREE IMP MM;
+END;
+IMEAN=IM[,+]/5;
+IMEDIAN=ID[,+]/5;
+PRINT "MEAN OVER IMPLICATES " IMEAN;
+PRINT "MEDIAN OVER IMPLICATES " IMEDIAN;
+FREE MDATA IMEAN IMEDIAN;
+
+%IF (&PFLAG EQ ) %THEN %DO;
+PRINT IM ID;
+%END;
+
+*   next sampling variance;
+*   create matrix to hold values of means/medians by replicates;
+RM=SHAPE(0,1,999);
+RD=SHAPE(0,1,999);
+
+%DO I=1 %TO 10;
+
+%IF (&PFLAG EQ ) %THEN %PUT CLUMP NUMBER &I;
+%IF (&I EQ 1) %THEN %DO;
+%LET TOP=99;
+%LET BOT=1;
+%LET LEN=100;
+%END;
+%ELSE %DO;
+%LET BOT=%EVAL(&TOP+1);
+%LET TOP=%EVAL(&TOP+100);
+%LET LEN=101;
+%END;
+%LET WSTR=%STR();
+%DO J=&BOT %TO &TOP;
+%LET WSTR=&WSTR WGT&J;
+%END;
+
+EDIT &DSN;
+TEMP={&VAR &WSTR};
+%IF (&WHERE EQ ) %THEN %DO;
+READ ALL VAR TEMP WHERE (IMPLIC=1 & &VAR>.Z) INTO MDATA;
+%END;
+%ELSE %DO;
+READ ALL VAR TEMP WHERE (IMPLIC=1 & &WHERE) INTO MDATA;
+%END;
+
+*     compute means;
+MEAN=MDATA[,2:&LEN]#MDATA[,1];
+%IF (&WHERE NE ) %THEN %DO;
+POP=MDATA[+,2:&LEN];
+RM[,&BOT:&TOP]=MEAN[+,]/POP[,1:&LEN-1];
+%END;
+%ELSE %DO;
+RM[,&BOT:&TOP]=MEAN[+,]/POP;
+%END;
+
+*     compute medians;
+DO I=2 TO &LEN;
+%IF (&WHERE NE ) %THEN %DO;
+MDATA[,I]=CUSUM(MDATA[,I])/POP[I-1];
+%END;
+%ELSE %DO;
+MDATA[,I]=CUSUM(MDATA[,I])/POP;
+%END;
+RD[&BOT+I-2]=MDATA[MIN(LOC(MDATA[,I]>=.5)),1];
+END;
+FREE MDATA;
+%END;
+
+%IF (&PFLAG EQ ) %THEN %DO;
+PRINT RM RD;
+%END;
+
+*   finally, compute standard error wrt imputation/sampling;
+*   (X-X-bar)**2/(n-1);
+IVM=(IM-IM[,+]/5)##2;
+IVM=IVM[,+]/4;
+IVD=(ID-ID[,+]/5)##2;
+IVD=IVD[,+]/4;
+
+RVM=(RM-RM[,+]/999)##2;
+RVM=RVM[,+]/998;
+RVD=(RD-RD[,+]/999)##2;
+RVD=RVD[,+]/998;
+
+*   SQRT((((ni+1)/ni))*(SIGMAI**2) + SIGMAR**2);
+TVM=SQRT((6/5)*IVM+RVM);
+TVD=SQRT((6/5)*IVD+RVD);
+
+IVM=SQRT(IVM);
+IVD=SQRT(IVD);
+RVM=SQRT(RVM);
+RVD=SQRT(RVD);
+
+PRINT "STD DEV IMPUTATION: MEAN: " IVM "    MEDIAN: " IVD;
+PRINT "STD DEV SAMPLING: MEAN: " RVM "    MEDIAN: " RVD;
+PRINT "COMBINED STD DEV: MEAN: " TVM "    MEDIAN: " TVD;
+
+QUIT;
+
+%MEND MEANIT;
+
+* create data set from main data set and replicate weight file;
+DATA DAT(KEEP=NW IMPLIC WGT0-WGT999);
+MERGE xxx.main_ds(KEEP=Y1 X42001 ...)
+xxx.rep_wgts(KEEP=Y1 MM1-MM999 WT1B1-WT1B999);
+BY Y1;
+
+* multiply replicate weights by the multiplicity;
+ARRAY MULT {*} MM1-MM999;
+ARRAY RWGT {*} WT1B1-WT1B999;
+ARRAY WGTS {*} WGT1-WGT999;
+DO I=1 TO DIM(MULT);
+*   take max of multiplicity/weight: where cases not selected for
+a replicate, there are missing values in these variables;
+WGTS{I}=MAX(0,MULT{I})*MAX(0,RWGT{I});
+END;
+WGT0=X42001;
+
+* define implicate number of case;
+IMPLIC=Y1-10*YY1;
+
+* define net worth (for example);
+NW=.......;
+RUN;
+
+
+* run the macro;
+%MEANIT(DSN=DAT,VAR=NW);
